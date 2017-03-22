@@ -22,4 +22,16 @@ A first ruleset for the Quickstart
       something = "Hello World"
   }
   
+  rule store_name {
+    select when hello name
+    pre{
+      name = event:attr("name").klog("our passed in name: ")
+    }
+    send_directive("store_name") with
+      name = name
+    always{
+      ent:name := name
+    }
+  }
+  
 }
