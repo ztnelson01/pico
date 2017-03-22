@@ -1,4 +1,4 @@
-ruleset hello_world {
+ruleset echo {
   meta {
     name "Hello World"
     description <<
