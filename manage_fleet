@@ -1,37 +1,193 @@
 ruleset manage_fleet{
   meta {
     name "Fleet Manager"
-    shares __testing
+    use module Subscriptions
+    shares __testing, vehicles, getTripsFromAllVehicles, printReports
   }
 
   global {
-    hello = function(obj) {
-      msg = "Hello " + obj;
-      msg
+    __testing = {
+      "queries": [
+         {"name":"vehicles"},
+         {"name":"getTripsFromAllVehicles"},
+         {"name":"printReports"}
+       ],
+       "events": [
+          { "domain": "car", "type": "new_vehicle", "attrs": [ "vehicle_id" ]   },
+          { "domain": "car", "type": "unneeded_vehicle", "attrs": [ "vehicle_id" ]   },
+          { "domain": "car", "type": "start_report"    },
+          { "domain": "car", "type": "clear_reports"    }
+        ]
+      }
+
+    getNameFromID = function(vehicleID){
+      "Vehicle# " + vehicleID + " Pico"
+    }
+    vehicles = function() {
+      ent:vehicles
+    }
+    subscriptionFromId = function(vehicle_id) {
+      "vehicle_" + vehicle_id
+    }
+    subscriptionName = function(vehicle_id) {
+      "car:" + subscriptionFromId(vehicle_id)
     }
 
-    long_trip = 5
+    urlForQuery = function(subscription) {
+      "http://34.208.82.175:8080/sky/cloud/" + subscription{"attributes"}{"subscriber_eci"} + "/trips_store/trips"
+    }
 
-    __testing = {
-            "events": [ { "domain": "car", "type": "new_trip", "attrs": [ "mileage" ]   }  ]
-          }
+    getTripsFromAllVehicles = function() {
+      Subscriptions:getSubscriptions().filter(function(x) {x{"attributes"}{"subscriber_role"} == "vehicle"}).map(function(x) {
+        result = http:get(urlForQuery(x));
+        result{"content"}.decode()
+      })
+    }
+
+    printReports = function() {
+      length = ent:reports.values().length();
+      (length > 5) => ent:reports.values().slice(length - 5, length - 1) | ent:reports.values()
+    }
+
   }
 
-  rule section_needed {
-    select when section needed
+  rule create_vehicle {
+    select when car new_vehicle
     pre {
-      section_id = event:attr("section_id")
-      exists = ent:sections >< section_id
+      newVehicleID = event:attr("vehicle_id")
+      exists = ent:vehicleIDs >< newVehicleID
       eci = meta:eci
     }
     if exists then
-      send_directive("section_ready")
-        with section_id = section_id
+      send_directive("vehicle already exists")
+        with newVehicleID = newVehicleID
     fired {
     } else {
-      ent:sections := ent:sections.defaultsTo([]).union([section_id]);
       raise pico event "new_child_request"
-        attributes { "dname": nameFromID(section_id), "color": "#FF69B4" }
+        attributes {  "dname": getNameFromID(newVehicleID),
+                      "color": "#FF69B4",
+                      "vehicle_id": newVehicleID}
+    }
+  }
+
+  rule pico_child_initialized{
+    select when pico child_initialized
+    pre {
+      vehicle = event:attr("new_child")
+      vehicle_id = event:attr("rs_attrs"){"vehicle_id"}
+      eci = meta:eci
+    }
+    event:send({
+      "eci":vehicle.eci,
+      "eid":"install-ruleset",
+      "domain": "pico",
+      "type":"new_ruleset",
+      "attrs": { "rid": "Subscriptions", "vehicle_id": vehicle_id }
+    })
+    event:send({
+      "eci":vehicle.eci,
+      "eid":"install-ruleset",
+      "domain": "pico",
+      "type":"new_ruleset",
+      "attrs": { "rid": "trips_store" }
+    })
+    event:send({
+      "eci":vehicle.eci,
+      "eid":"install-ruleset",
+      "domain": "pico",
+      "type":"new_ruleset",
+      "attrs": { "rid": "track_trips" }
+    })
+    event:send({
+      "eci": eci,
+      "eid": "subscription",
+      "domain": "wrangler",
+      "type": "subscription",
+      "attrs": { "name": subscriptionFromId(vehicle_id),
+                 "name_space": "car",
+                 "my_role": "fleet",
+                 "subscriber_role": "vehicle",
+                 "channel_type": "subscription",
+                 "subscriber_eci": vehicle.eci}
+    })
+    fired{
+      ent:vehicles := ent:vehicles.defaultsTo({});
+      ent:vehicles{vehicle_id} := vehicle
+    }
+  }
+
+  rule delete_vehicle {
+    select when car unneeded_vehicle
+    pre {
+      vehicle_id = event:attr("vehicle_id")
+      exists = ent:vehicles >< vehicle_id
+      eci = meta:eci
+      toDelete = ent:vehicles{vehicle_id}
+    }
+    if exists then
+      send_directive("vehicle removed")
+        with vehicle_id = vehicle_id
+    fired {
+      raise wrangler event "subscription_cancellation"
+        with subscription_name = subscriptionName(vehicle_id);
+      raise pico event "delete_child_request"
+        attributes toDelete;
+      ent:vehicles{[vehicle_id]} := null
+    }
+  }
+
+  rule start_report {
+    select when car start_report
+    pre {
+      rcn = time:now().replace(".", ":")
+      eci = meta:eci
+    }
+    fired {
+      raise explicit event "generate_report"
+        attributes {"rcn": rcn, "eci": eci}
+    }
+  }
+
+  rule generate_report {
+    select when explicit generate_report
+    foreach Subscriptions:getSubscriptions() setting (subscription)
+      pre {
+        eci = event:attr("eci")
+        rcn = event:attr("rcn")
+      }
+      if subscription{"attributes"}{"subscriber_role"} == "vehicle" then
+        event:send({
+          "eci": subscription{"attributes"}{"subscriber_eci"},
+          "eid": "generate_report",
+          "domain": "car",
+          "type": "generate_report",
+          "attrs": {
+            "rcn": rcn,
+            "sender_eci": eci,
+            "vehicle_id": subscription{"name"}
+          }
+        })
+  }
+
+  rule collect_report {
+    select when car send_report
+    pre {
+      rcn = event:attr("rcn")
+      vehicle_id = event:attr("vehicle_id")
+      trips = event:attr("trips")
+    }
+    always {
+      ent:reports := ent:reports.defaultsTo({});
+      ent:reports{[rcn, "vehicles_responded"]} := ent:vehicles.length();
+      ent:reports{[rcn, vehicle_id]} := trips
+    }
+  }
+
+  rule clear_reports {
+    select when car clear_reports
+    always {
+      ent:reports := {};
+      ent:counter := 0
     }
   }
 }
