@@ -19,7 +19,9 @@ A first ruleset for the Quickstart
     long_trip = 5
 
     __testing = {
-            "queries": [ { "name": "short_trips"}],
+            "queries": [ { "name": "short_trips"},
+                        { "name": "long_trips"},
+                        { "name": "trips"}],
             "events": [  { "domain": "car", "type": "trip_reset", "attrs": []   }  ]
           }
 
@@ -76,4 +78,17 @@ A first ruleset for the Quickstart
         ent:longTrips := []
       }
   }
+
+  rule generate_report {
+   select when car generate_report
+   pre {
+     eci = event:attr("sender_eci")
+     rcn = event:attr("rcn")
+     vehicle_id = event:attr("vehicle_id")
+     attributes = {"rcn": rcn,
+     "vehicle_id": vehicle_id,
+     "trips": ent:trips}
+   }
+   event:send({ "eci": eci, "eid": "send_report", "domain": "car", "type": "send_report", "attrs": attributes})
+ }
 }
